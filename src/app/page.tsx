@@ -68,9 +68,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import * as ort from "onnxruntime-web";
 
 type CvType = any;
+type OrtType = any;
 
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -82,8 +82,31 @@ export default function Home() {
 
   const cvRef = useRef<CvType | null>(null);
   const faceCascadeRef = useRef<any>(null);
-  const sessionRef = useRef<ort.InferenceSession | null>(null);
+  const sessionRef = useRef<any>(null);
   const classesRef = useRef<string[] | null>(null);
+  const ortRef = useRef<OrtType | null>(null);
+
+  // Load ONNX Runtime
+  async function loadONNXRuntime() {
+    if (typeof window === "undefined") return;
+    
+    if ((window as any).ort) {
+      ortRef.current = (window as any).ort;
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/onnxruntime-web/1.14.0/ort.min.js";
+      script.async = true;
+      script.onload = () => {
+        ortRef.current = (window as any).ort;
+        resolve();
+      };
+      script.onerror = () => reject(new Error("โหลด ONNX Runtime ไม่สำเร็จ"));
+      document.body.appendChild(script);
+    });
+  }
 
   // Load OpenCV.js
   // async function loadOpenCV() {
@@ -111,45 +134,44 @@ export default function Home() {
   //   });
   // }
   async function loadOpenCV() {
-  if (typeof window === "undefined") return;
+    if (typeof window === "undefined") return;
 
-  // ready แล้ว
-  if ((window as any).cv?.Mat) {
-    cvRef.current = (window as any).cv;
-    return;
-  }
+    // ready แล้ว
+    if ((window as any).cv?.Mat) {
+      cvRef.current = (window as any).cv;
+      return;
+    }
 
-  await new Promise<void>((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "/opencv/opencv.js";
-    script.async = true;
+    await new Promise<void>((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "/opencv/opencv.js";
+      script.async = true;
 
-    script.onload = () => {
-      const cv = (window as any).cv;
-      if (!cv) return reject(new Error("OpenCV โหลดแล้วแต่ window.cv ไม่มีค่า"));
+      script.onload = () => {
+        const cv = (window as any).cv;
+        if (!cv) return reject(new Error("OpenCV โหลดแล้วแต่ window.cv ไม่มีค่า"));
 
-      const waitReady = () => {
-        if ((window as any).cv?.Mat) {
-          cvRef.current = (window as any).cv;
-          resolve();
+        const waitReady = () => {
+          if ((window as any).cv?.Mat) {
+            cvRef.current = (window as any).cv;
+            resolve();
+          } else {
+            setTimeout(waitReady, 50);
+          }
+        };
+
+        // บาง build มี callback บาง build พร้อมทันที
+        if ("onRuntimeInitialized" in cv) {
+          cv.onRuntimeInitialized = () => waitReady();
         } else {
-          setTimeout(waitReady, 50);
+          waitReady();
         }
       };
 
-      // บาง build มี callback บาง build พร้อมทันที
-      if ("onRuntimeInitialized" in cv) {
-        cv.onRuntimeInitialized = () => waitReady();
-      } else {
-        waitReady();
-      }
-    };
-
-    script.onerror = () => reject(new Error("โหลด /opencv/opencv.js ไม่สำเร็จ"));
-    document.body.appendChild(script);
-  });
-}
-
+      script.onerror = () => reject(new Error("โหลด /opencv/opencv.js ไม่สำเร็จ"));
+      document.body.appendChild(script);
+    });
+  }
 
   // Load Haar cascade file into OpenCV FS
   async function loadCascade() {
@@ -176,6 +198,9 @@ export default function Home() {
 
   // 3) Load ONNX model + classes
   async function loadModel() {
+    const ort = ortRef.current;
+    if (!ort) throw new Error("ONNX Runtime ยังไม่พร้อม");
+    
     const session = await ort.InferenceSession.create(
       "/models/emotion_yolo11n_cls.onnx",
       { executionProviders: ["wasm"] }
@@ -203,6 +228,9 @@ export default function Home() {
 
   // 5) Preprocess face ROI -> tensor
   function preprocessToTensor(faceCanvas: HTMLCanvasElement) {
+    const ort = ortRef.current;
+    if (!ort) throw new Error("ONNX Runtime ยังไม่พร้อม");
+    
     // YOLO classification มักรับ input เป็น [1,3,H,W] float32 (0..1)
     // เพื่อให้ง่าย: resize เป็น 64x64 และทำ RGB
     const size = 64;
@@ -306,7 +334,7 @@ export default function Home() {
 
         // ชื่อ input/output อาจต่างกันตามการ export
         // วิธีง่าย: ใช้ key ตัวแรกของ session.inputNames
-        const feeds: Record<string, ort.Tensor> = {};
+        const feeds: Record<string, any> = {};
         feeds[session.inputNames[0]] = input;
 
         const out = await session.run(feeds);
@@ -348,6 +376,9 @@ export default function Home() {
   useEffect(() => {
     (async () => {
       try {
+        setStatus("กำลังโหลด ONNX Runtime...");
+        await loadONNXRuntime();
+
         setStatus("กำลังโหลด OpenCV...");
         await loadOpenCV();
 
@@ -365,36 +396,55 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="min-h-screen p-6 space-y-4">
-      <h1 className="text-2xl font-bold">Face Emotion (OpenCV + YOLO11-CLS)</h1>
+    <div className="min-h-screen bg-gray-900 text-white p-8">
+      <div className="max-w-4xl mx-auto space-y-6">
+        {/* Header */}
+        <div className="text-center">
+          <h1 className="text-4xl font-bold mb-2">Emotion Detection</h1>
+          <p className="text-gray-400">ตรวจจับอารมณ์จากใบหน้า</p>
+        </div>
 
-      <div className="space-y-2">
-        <div className="text-sm">สถานะ: {status}</div>
-        <div className="text-sm">
-          Emotion: <b>{emotion}</b> | Conf: <b>{(conf * 100).toFixed(1)}%</b>
+        {/* Status */}
+        <div className="bg-gray-800 rounded-lg p-4">
+          <div className="text-sm text-gray-400">สถานะ</div>
+          <div className="text-lg font-semibold">{status}</div>
+        </div>
+
+        {/* Video & Result */}
+        <div className="grid md:grid-cols-2 gap-6">
+          {/* Video */}
+          <div>
+            <video ref={videoRef} className="hidden" playsInline />
+            <canvas ref={canvasRef} className="w-full rounded-lg bg-black" />
+            <button
+              onClick={startCamera}
+              className="w-full mt-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-lg transition"
+            >
+              🎥 เริ่มกล้อง
+            </button>
+          </div>
+
+          {/* Result */}
+          <div className="space-y-4">
+            <div className="bg-gray-800 rounded-lg p-6 text-center">
+              <div className="text-6xl mb-4">😊</div>
+              <div className="text-sm text-gray-400">อารมณ์</div>
+              <div className="text-3xl font-bold">{emotion}</div>
+            </div>
+
+            <div className="bg-gray-800 rounded-lg p-6">
+              <div className="text-sm text-gray-400 mb-2">ความมั่นใจ</div>
+              <div className="text-2xl font-bold mb-3">{(conf * 100).toFixed(1)}%</div>
+              <div className="w-full bg-gray-700 rounded-full h-3">
+                <div
+                  className="bg-blue-500 h-3 rounded-full transition-all duration-300"
+                  style={{ width: `${conf * 100}%` }}
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
-
-      <div className="flex gap-3">
-        <button
-          className="px-4 py-2 rounded bg-black text-white"
-          onClick={startCamera}
-        >
-          Start Camera
-        </button>
-      </div>
-
-      <div className="relative w-full max-w-3xl">
-        <video ref={videoRef} className="hidden" playsInline />
-        <canvas
-          ref={canvasRef}
-          className="w-full rounded border"
-        />
-      </div>
-
-      <p className="text-sm text-gray-600">
-        หมายเหตุ: ต้องกดปุ่ม Start เพื่อขอสิทธิ์เปิดกล้อง
-      </p>
-    </main>
+    </div>
   );
 }
